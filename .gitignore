@@ -221,3 +221,18 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# IDEs
+.vscode/
+.idea/
+
+# Imagens capturadas
+data/captures/*
+!data/captures/.gitkeep
+
+# Dados locais de calibração
+data/calibration/*
+!data/calibration/.gitkeep
+
+# Arquivos temporários
+*.log
