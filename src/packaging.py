@@ -6,6 +6,10 @@ com base na espessura de parede da chapa de papelão (hipótese de projeto),
 aplicar margem de segurança de acondicionamento, testar compatibilidade espacial
 considerando permutações ortogonais e selecionar a melhor embalagem com base
 no menor volume interno útil e menor preço de referência.
+
+Também classifica todas as embalagens do catálogo em quatro status funcionais
+(RECOMMENDED, ALTERNATIVE, NOT_RECOMMENDED, INCOMPATIBLE) baseando-se em
+heurísticas de ocupação volumétrica útil para facilitar a integração com o Streamlit.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import json
 import logging
 import math
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -26,10 +31,39 @@ DEFAULT_WALL_THICKNESS: float = 0.4  # cm
 # Margem padrão de segurança para acondicionamento e proteção por face (5 mm)
 DEFAULT_MARGIN_PER_FACE: float = 0.5  # cm
 
+# Heurística de projeto: limiar percentual de ocupação mínima para embalagens alternativas.
+# NOTA: Trata-se de uma heurística interna do projeto PackMeasure para evitar caixas excessivamente
+# sobredimensionadas, e NÃO de uma regra oficial dos Correios.
+DEFAULT_MIN_OCCUPANCY_THRESHOLD: float = 20.0  # %
+
 DISCLAIMER_TEXT: str = (
     "A compatibilidade é estimada com base nas hipóteses dimensionais do projeto e não "
-    "garante o acondicionamento físico definitivo, nem realiza estimativa ou otimização de custo de frete."
+    "garante o acondicionamento físico definitivo, nem realiza estimativa ou otimização de custo de frete. "
+    "O limiar de ocupação volumétrica mínima é uma heurística própria do projeto."
 )
+
+
+# ============================================================================
+# Enumerações
+# ============================================================================
+
+
+class PackageStatus(str, Enum):
+    """Classificação funcional das embalagens do catálogo para a recomendação.
+
+    RECOMMENDED: Menor embalagem compatível com as dimensões necessárias, independentemente
+        da sua taxa de ocupação volumétrica.
+    ALTERNATIVE: Demais embalagens compatíveis com ocupação volumétrica útil igual ou superior
+        ao limiar configurável (heurística de projeto).
+    NOT_RECOMMENDED: Demais embalagens compatíveis cuja ocupação volumétrica útil é inferior
+        ao limiar configurado, gerando espaço ocioso excessivo.
+    INCOMPATIBLE: Embalagem que não acomoda o objeto em nenhuma das seis orientações ortogonais.
+    """
+
+    RECOMMENDED = "RECOMMENDED"
+    ALTERNATIVE = "ALTERNATIVE"
+    NOT_RECOMMENDED = "NOT_RECOMMENDED"
+    INCOMPATIBLE = "INCOMPATIBLE"
 
 
 # ============================================================================
@@ -62,7 +96,7 @@ class CatalogValidationError(CatalogError):
 
 
 class InvalidDimensionsError(PackagingError):
-    """Dimensões, margens ou espessuras inválidas (não positivas, nulas, infinitas ou NaN)."""
+    """Dimensões, margens, espessuras ou limiares inválidos."""
 
     pass
 
@@ -136,7 +170,9 @@ class Package:
             and self.internal_height is not None
         )
 
-    def get_internal_dimensions(self, wall_thickness: float = DEFAULT_WALL_THICKNESS) -> Tuple[float, float, float]:
+    def get_internal_dimensions(
+        self, wall_thickness: float = DEFAULT_WALL_THICKNESS
+    ) -> Tuple[float, float, float]:
         """Obtém as dimensões internas úteis (C, L, A) em cm.
 
         Se dimensões internas confirmadas foram registradas no catálogo, utiliza-as diretamente.
@@ -162,7 +198,6 @@ class Package:
         ):
             return (self.internal_length, self.internal_width, self.internal_height)
 
-        # Cálculo estimado subtraindo 2 * wall_thickness em cada eixo
         delta = 2.0 * wall_thickness
         int_l = self.length - delta
         int_w = self.width - delta
@@ -181,7 +216,9 @@ class Package:
         int_l, int_w, int_h = self.get_internal_dimensions(wall_thickness)
         return int_l * int_w * int_h
 
-    def get_internal_volume_liters(self, wall_thickness: float = DEFAULT_WALL_THICKNESS) -> float:
+    def get_internal_volume_liters(
+        self, wall_thickness: float = DEFAULT_WALL_THICKNESS
+    ) -> float:
         """Retorna o volume interno útil em litros."""
         return self.get_internal_volume(wall_thickness) / 1000.0
 
@@ -289,6 +326,97 @@ class PackageFit:
 
 
 @dataclass
+class PackageEvaluation:
+    """Avaliação completa de uma embalagem do catálogo (compatível ou incompatível).
+
+    Attributes:
+        package: Modelo da embalagem avaliada.
+        status: Classificação da embalagem (PackageStatus).
+        is_compatible: Indica se a embalagem acomoda o objeto em alguma orientação.
+        justification: Justificativa dinâmica em português sobre a classificação.
+        external_dimensions: Dimensões externas nominais da caixa (C, L, A) em cm.
+        internal_dimensions: Dimensões internas úteis (C, L, A) em cm.
+        internal_volume: Volume interno útil em cm³.
+        is_internal_estimated: Se as medidas internas são estimadas via espessura.
+        price: Preço de referência em reais (BRL).
+        orientation: Detalhes da orientação quando compatível, ou None.
+        clearance: Folgas por eixo (C, L, A) quando compatível, ou None.
+        occupancy_ratio: Percentual de ocupação volumétrica do bounding box (0 a 100%), ou None.
+        occupancy_ratio_with_margin: Percentual considerando a margem, ou None.
+        deficit_details: Informações do déficit dimensional na melhor orientação quando incompatível.
+    """
+
+    package: Package
+    status: PackageStatus
+    is_compatible: bool
+    justification: str
+    external_dimensions: Tuple[float, float, float]
+    internal_dimensions: Tuple[float, float, float]
+    internal_volume: float
+    is_internal_estimated: bool
+    price: float
+    orientation: Optional[OrientationFit] = None
+    clearance: Optional[Tuple[float, float, float]] = None
+    occupancy_ratio: Optional[float] = None
+    occupancy_ratio_with_margin: Optional[float] = None
+    deficit_details: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converte a avaliação da embalagem para dicionário estruturado para Streamlit."""
+        return {
+            "package_id": self.package.id,
+            "package_name": self.package.name,
+            "status": self.status.value,
+            "is_compatible": self.is_compatible,
+            "justification": self.justification,
+            "price": self.price,
+            "currency": self.package.currency,
+            "external_dimensions_cm": {
+                "length": round(self.external_dimensions[0], 2),
+                "width": round(self.external_dimensions[1], 2),
+                "height": round(self.external_dimensions[2], 2),
+                "volume_liters": round(self.package.external_volume_liters, 2),
+            },
+            "internal_dimensions_cm": {
+                "length": round(self.internal_dimensions[0], 2),
+                "width": round(self.internal_dimensions[1], 2),
+                "height": round(self.internal_dimensions[2], 2),
+                "volume_liters": round(self.internal_volume / 1000.0, 2),
+                "is_estimated": self.is_internal_estimated,
+            },
+            "occupancy_ratio_percent": (
+                round(self.occupancy_ratio, 2) if self.occupancy_ratio is not None else None
+            ),
+            "occupancy_ratio_with_margin_percent": (
+                round(self.occupancy_ratio_with_margin, 2)
+                if self.occupancy_ratio_with_margin is not None
+                else None
+            ),
+            "orientation": (
+                {
+                    "aligned_dimensions_cm": [
+                        round(d, 2) for d in self.orientation.aligned_dimensions
+                    ],
+                    "clearance_cm": [round(c, 2) for c in self.orientation.clearance],
+                    "description": self.orientation.description,
+                }
+                if self.orientation
+                else None
+            ),
+            "clearance_cm": (
+                {
+                    "length": round(self.clearance[0], 2),
+                    "width": round(self.clearance[1], 2),
+                    "height": round(self.clearance[2], 2),
+                }
+                if self.clearance
+                else None
+            ),
+            "deficit_details": self.deficit_details,
+        }
+
+
+@dataclass
 class RecommendationResult:
     """Resultado consolidado da recomendação de embalagens.
 
@@ -298,12 +426,15 @@ class RecommendationResult:
         total_margin_per_axis: Acréscimo total aplicado ao objeto em cada dimensão (2 * margin_per_face).
         wall_thickness: Espessura estimada de parede adotada por face da caixa em cm.
         total_wall_reduction_per_axis: Redução total por eixo aplicada à caixa externa (2 * wall_thickness).
+        min_occupancy_threshold: Limiar percentual configurado para status ALTERNATIVE (heurística de projeto).
         required_dimensions: Dimensões necessárias do objeto após acréscimo da margem.
         bounding_box_volume: Volume da caixa delimitadora original do objeto em cm³.
         required_volume: Volume necessário após acréscimo da margem em cm³.
         recommended: Embalagem recomendada (ótima por menor volume interno e menor preço) ou None.
-        alternatives: Lista das demais embalagens compatíveis ordenadas.
-        all_compatible: Lista completa de embalagens compatíveis ordenadas.
+        alternatives: Lista das embalagens compatíveis com status ALTERNATIVE.
+        not_recommended: Lista das embalagens compatíveis com status NOT_RECOMMENDED (baixa ocupação).
+        all_compatible: Lista completa de todas as embalagens compatíveis ordenadas.
+        evaluations: Lista com a avaliação individual de todas as embalagens do catálogo (incluindo incompatíveis).
         disclaimer: Aviso de que a compatibilidade é estimada e não garante acondicionamento físico.
     """
 
@@ -312,12 +443,15 @@ class RecommendationResult:
     total_margin_per_axis: float
     wall_thickness: float
     total_wall_reduction_per_axis: float
+    min_occupancy_threshold: float
     required_dimensions: Tuple[float, float, float]
     bounding_box_volume: float
     required_volume: float
     recommended: Optional[PackageFit] = None
     alternatives: List[PackageFit] = field(default_factory=list)
+    not_recommended: List[PackageFit] = field(default_factory=list)
     all_compatible: List[PackageFit] = field(default_factory=list)
+    evaluations: List[PackageEvaluation] = field(default_factory=list)
     disclaimer: str = DISCLAIMER_TEXT
 
     @property
@@ -326,7 +460,7 @@ class RecommendationResult:
         return self.recommended is not None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Converte o resultado consolidado para dicionário estruturado."""
+        """Converte o resultado consolidado para dicionário estruturado para Streamlit."""
         return {
             "success": self.has_compatible,
             "disclaimer": self.disclaimer,
@@ -335,6 +469,11 @@ class RecommendationResult:
                 "total_wall_reduction_per_axis_cm": self.total_wall_reduction_per_axis,
                 "margin_per_face_cm": self.margin_per_face,
                 "total_margin_per_axis_cm": self.total_margin_per_axis,
+                "min_occupancy_threshold_percent": self.min_occupancy_threshold,
+                "occupancy_threshold_note": (
+                    "O limiar de ocupação volumétrica mínima é uma heurística do projeto PackMeasure "
+                    "e não constitui regra oficial dos Correios."
+                ),
             },
             "object": {
                 "original_dimensions_cm": {
@@ -352,7 +491,9 @@ class RecommendationResult:
             },
             "recommended": self.recommended.to_dict() if self.recommended else None,
             "alternatives": [alt.to_dict() for alt in self.alternatives],
+            "not_recommended": [nr.to_dict() for nr in self.not_recommended],
             "total_compatible": len(self.all_compatible),
+            "evaluations": [ev.to_dict() for ev in self.evaluations],
         }
 
 
@@ -426,9 +567,21 @@ class PackageRecommender:
                 )
 
             try:
-                int_l = float(item["comprimento_interno"]) if "comprimento_interno" in item else None
-                int_w = float(item["largura_interna"]) if "largura_interna" in item else None
-                int_h = float(item["altura_interna"]) if "altura_interna" in item else None
+                int_l = (
+                    float(item["comprimento_interno"])
+                    if "comprimento_interno" in item
+                    else None
+                )
+                int_w = (
+                    float(item["largura_interna"])
+                    if "largura_interna" in item
+                    else None
+                )
+                int_h = (
+                    float(item["altura_interna"])
+                    if "altura_interna" in item
+                    else None
+                )
 
                 pkg = Package(
                     id=str(item["id"]).strip(),
@@ -472,13 +625,15 @@ class PackageRecommender:
         val: Any,
         name: str,
         strictly_positive: bool = True,
+        max_val: Optional[float] = None,
     ) -> float:
-        """Valida se um parâmetro numérico é válido, finito, não-NaN e positivo/não-negativo.
+        """Valida se um parâmetro numérico é válido, finito, não-NaN e dentro da faixa.
 
         Args:
             val: Valor a ser validado.
-            name: Nome do parâmetro para identificação em mensagens de erro.
+            name: Nome do parâmetro para mensagens de erro.
             strictly_positive: Se True, exige valor > 0. Se False, exige valor >= 0.
+            max_val: Limite superior opcional.
 
         Returns:
             Valor float validado.
@@ -495,7 +650,9 @@ class PackageRecommender:
             raise InvalidDimensionsError(f"Parâmetro '{name}' não pode ser NaN.")
 
         if not math.isfinite(val):
-            raise InvalidDimensionsError(f"Parâmetro '{name}' deve ser um valor finito (recebido: {val}).")
+            raise InvalidDimensionsError(
+                f"Parâmetro '{name}' deve ser um valor finito (recebido: {val})."
+            )
 
         if strictly_positive and val <= 0:
             raise InvalidDimensionsError(
@@ -505,6 +662,11 @@ class PackageRecommender:
         if not strictly_positive and val < 0:
             raise InvalidDimensionsError(
                 f"Parâmetro '{name}' não pode ser negativo (recebido: {val})."
+            )
+
+        if max_val is not None and val > max_val:
+            raise InvalidDimensionsError(
+                f"Parâmetro '{name}' não pode ser superior a {max_val} (recebido: {val})."
             )
 
         return float(val)
@@ -531,41 +693,49 @@ class PackageRecommender:
         height: float,
         margin_per_face: float = DEFAULT_MARGIN_PER_FACE,
         wall_thickness: float = DEFAULT_WALL_THICKNESS,
+        min_occupancy_threshold: float = DEFAULT_MIN_OCCUPANCY_THRESHOLD,
     ) -> RecommendationResult:
-        """Recomenda a melhor embalagem e identifica alternativas compatíveis.
+        """Recomenda a melhor embalagem e avalia todas as caixas do catálogo.
 
-        Avalia todas as 6 permutações ortogonais de acomodação do objeto no
-        espaço interno útil (estimado ou confirmado) de cada embalagem cadastrada.
-        Aplica a margem de segurança de acondicionamento (padrão 0.5 cm por face)
-        ao objeto e deduz a espessura de parede estimada (padrão 0.4 cm por face)
-        das embalagens com dimensões nominais externas.
-
-        Ordena as opções compatíveis primariamente pelo menor volume interno útil
-        e secundariamente pelo menor preço de referência.
+        Classifica todas as embalagens em quatro status (RECOMMENDED, ALTERNATIVE,
+        NOT_RECOMMENDED, INCOMPATIBLE), gerando justificativas dinâmicas e métricas
+        completas tanto para opções compatíveis quanto para incompatíveis.
 
         Args:
             length: Comprimento do objeto em cm.
             width: Largura do objeto em cm.
             height: Altura do objeto em cm.
-            margin_per_face: Margem de acondicionamento por face em cm (padrão 0.5 cm,
-                acrescentando 1.0 cm ao total de cada dimensão do objeto).
-            wall_thickness: Espessura de parede estimada em cm por face (padrão 0.4 cm,
-                deduzindo 0.8 cm ao total de cada dimensão externa da caixa).
+            margin_per_face: Margem de acondicionamento por face em cm (padrão 0.5 cm).
+            wall_thickness: Espessura de parede estimada em cm por face (padrão 0.4 cm).
+            min_occupancy_threshold: Limiar percentual de ocupação mínima para o status
+                ALTERNATIVE (padrão 20.0%, heurística de projeto).
 
         Returns:
-            Instância de RecommendationResult contendo a recomendação e detalhes.
+            Instância de RecommendationResult contendo a recomendação e avaliações.
 
         Raises:
-            InvalidDimensionsError: Se dimensões, margem ou espessura forem inválidas.
+            InvalidDimensionsError: Se dimensões, margem, espessura ou limiar forem inválidos.
         """
         # Validação de dimensões do objeto
         self.validate_dimensions(length, width, height)
 
-        # Validação da margem de segurança (pode ser 0, mas não negativa nem NaN/inf)
-        self._validate_numeric_param(margin_per_face, "margem por face", strictly_positive=False)
+        # Validação da margem de segurança (>= 0)
+        self._validate_numeric_param(
+            margin_per_face, "margem por face", strictly_positive=False
+        )
 
-        # Validação da espessura de parede (pode ser 0, mas não negativa nem NaN/inf)
-        self._validate_numeric_param(wall_thickness, "espessura de parede", strictly_positive=False)
+        # Validação da espessura de parede (>= 0)
+        self._validate_numeric_param(
+            wall_thickness, "espessura de parede", strictly_positive=False
+        )
+
+        # Validação do limiar de ocupação volumétrica (0.0% a 100.0%)
+        self._validate_numeric_param(
+            min_occupancy_threshold,
+            "limiar de ocupação mínima",
+            strictly_positive=False,
+            max_val=100.0,
+        )
 
         # Dimensões necessárias do objeto com margem de segurança (+ 2 * margem por eixo)
         total_margin = 2.0 * margin_per_face
@@ -581,12 +751,12 @@ class PackageRecommender:
         total_wall_reduction = 2.0 * wall_thickness
 
         compatible_fits: List[PackageFit] = []
+        package_evaluations: List[PackageEvaluation] = []
 
         # Permutações ortogonais únicas das dimensões necessárias do objeto (3! = 6)
         permutations = list(set(itertools.permutations([req_l, req_w, req_h])))
 
         for pkg in self.packages:
-            # Obtém dimensões internas úteis (confirmadas ou estimadas via espessura)
             int_dims = pkg.get_internal_dimensions(wall_thickness=wall_thickness)
             int_l, int_w, int_h = int_dims
             int_vol = pkg.get_internal_volume(wall_thickness=wall_thickness)
@@ -594,11 +764,10 @@ class PackageRecommender:
 
             best_orientation_fit: Optional[OrientationFit] = None
 
-            # Testa as permutações ortogonais contra o espaço interno útil
+            # 1. Avalia se cabe em alguma permutação ortogonal
             for perm in permutations:
                 p_l, p_w, p_h = perm
 
-                # Condição estrita de compatibilidade dimensional interna
                 if p_l <= int_l and p_w <= int_w and p_h <= int_h:
                     clearance = (
                         int_l - p_l,
@@ -618,38 +787,162 @@ class PackageRecommender:
                         description=desc,
                     )
 
-                    # Seleciona a orientação com melhor distribuição de folga (maior folga mínima)
-                    if best_orientation_fit is None or min(candidate_fit.clearance) > min(
-                        best_orientation_fit.clearance
-                    ):
+                    if best_orientation_fit is None or min(
+                        candidate_fit.clearance
+                    ) > min(best_orientation_fit.clearance):
                         best_orientation_fit = candidate_fit
 
-            # Se coube em ao menos uma orientação ortogonal
+            # Se a embalagem é dimensionalmente compatível
             if best_orientation_fit is not None:
                 occ_ratio = (obj_vol / int_vol) * 100.0 if int_vol > 0 else 0.0
-                occ_ratio_margin = (req_vol / int_vol) * 100.0 if int_vol > 0 else 0.0
-
-                compatible_fits.append(
-                    PackageFit(
-                        package=pkg,
-                        internal_dimensions=int_dims,
-                        internal_volume=int_vol,
-                        is_internal_estimated=is_estimated,
-                        orientation=best_orientation_fit,
-                        bounding_box_volume=obj_vol,
-                        required_volume=req_vol,
-                        occupancy_ratio=occ_ratio,
-                        occupancy_ratio_with_margin=occ_ratio_margin,
-                    )
+                occ_ratio_margin = (
+                    (req_vol / int_vol) * 100.0 if int_vol > 0 else 0.0
                 )
 
-        # Ordenação:
-        # 1º Menor volume interno útil da embalagem
-        # 2º Menor preço conhecido de referência
+                fit = PackageFit(
+                    package=pkg,
+                    internal_dimensions=int_dims,
+                    internal_volume=int_vol,
+                    is_internal_estimated=is_estimated,
+                    orientation=best_orientation_fit,
+                    bounding_box_volume=obj_vol,
+                    required_volume=req_vol,
+                    occupancy_ratio=occ_ratio,
+                    occupancy_ratio_with_margin=occ_ratio_margin,
+                )
+                compatible_fits.append(fit)
+            else:
+                # 2. Caso incompatível: calcula a orientação com menor déficit dimensional
+                best_deficit_perm: Optional[Tuple[float, float, float]] = None
+                min_total_deficit = float("inf")
+                best_deficits: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+                for perm in permutations:
+                    p_l, p_w, p_h = perm
+                    def_l = max(0.0, p_l - int_l)
+                    def_w = max(0.0, p_w - int_w)
+                    def_h = max(0.0, p_h - int_h)
+                    tot_def = def_l + def_w + def_h
+
+                    if tot_def < min_total_deficit:
+                        min_total_deficit = tot_def
+                        best_deficit_perm = perm
+                        best_deficits = (def_l, def_w, def_h)
+
+                # Monta a justificativa dinâmica com os eixos excedentes
+                exceeded_parts: List[str] = []
+                axis_names = ["comprimento", "largura", "altura"]
+                deficit_map: Dict[str, float] = {}
+
+                for ax_name, ax_def in zip(axis_names, best_deficits):
+                    if ax_def > 0:
+                        exceeded_parts.append(f"{ax_name} em {ax_def:.1f} cm")
+                        deficit_map[f"excesso_{ax_name}_cm"] = round(ax_def, 2)
+
+                deficit_str = ", ".join(exceeded_parts)
+                justification = (
+                    f"Incompatível: dimensões necessárias excedem o espaço interno útil. "
+                    f"Na melhor orientação ({best_deficit_perm[0]:.1f}×{best_deficit_perm[1]:.1f}×{best_deficit_perm[2]:.1f} cm), "
+                    f"excede {deficit_str} (nenhuma orientação é viável)."
+                )
+
+                deficit_details = {
+                    "melhor_orientacao_cm": [
+                        round(d, 2) for d in best_deficit_perm
+                    ],
+                    "deficits_cm": deficit_map,
+                    "deficit_total_cm": round(min_total_deficit, 2),
+                }
+
+                evaluation = PackageEvaluation(
+                    package=pkg,
+                    status=PackageStatus.INCOMPATIBLE,
+                    is_compatible=False,
+                    justification=justification,
+                    external_dimensions=pkg.external_dimensions,
+                    internal_dimensions=int_dims,
+                    internal_volume=int_vol,
+                    is_internal_estimated=is_estimated,
+                    price=pkg.price,
+                    orientation=None,
+                    clearance=None,
+                    occupancy_ratio=None,
+                    occupancy_ratio_with_margin=None,
+                    deficit_details=deficit_details,
+                )
+                package_evaluations.append(evaluation)
+
+        # Ordena as compatíveis por menor volume interno útil e menor preço
         compatible_fits.sort(key=lambda fit: (fit.internal_volume, fit.package.price))
 
-        recommended = compatible_fits[0] if compatible_fits else None
-        alternatives = compatible_fits[1:] if len(compatible_fits) > 1 else []
+        recommended: Optional[PackageFit] = None
+        alternatives: List[PackageFit] = []
+        not_recommended: List[PackageFit] = []
+
+        # Classifica as embalagens compatíveis segundo os status definidos
+        for idx, fit in enumerate(compatible_fits):
+            pkg = fit.package
+            occ = fit.occupancy_ratio
+
+            if idx == 0:
+                # Regra: menor embalagem compatível é sempre RECOMMENDED, independentemente da ocupação
+                status = PackageStatus.RECOMMENDED
+                recommended = fit
+                justification = (
+                    f"Recomendada: menor embalagem compatível com as dimensões necessárias "
+                    f"(volume útil de {fit.internal_volume / 1000.0:.2f} L, ocupação de {occ:.1f}%)."
+                )
+            else:
+                # Demais compatíveis: compara com o limiar configurável
+                if occ >= min_occupancy_threshold:
+                    status = PackageStatus.ALTERNATIVE
+                    alternatives.append(fit)
+                    justification = (
+                        f"Alternativa: embalagem compatível com boa acomodação "
+                        f"({occ:.1f}% de ocupação útil >= limiar de {min_occupancy_threshold:.0f}%), "
+                        f"com maior folga disponível."
+                    )
+                else:
+                    status = PackageStatus.NOT_RECOMMENDED
+                    not_recommended.append(fit)
+                    justification = (
+                        f"Não indicada: embalagem compatível, porém com baixa ocupação volumétrica "
+                        f"({occ:.1f}% < limiar de {min_occupancy_threshold:.0f}%), gerando espaço ocioso excessivo."
+                    )
+
+            ev = PackageEvaluation(
+                package=pkg,
+                status=status,
+                is_compatible=True,
+                justification=justification,
+                external_dimensions=pkg.external_dimensions,
+                internal_dimensions=fit.internal_dimensions,
+                internal_volume=fit.internal_volume,
+                is_internal_estimated=fit.is_internal_estimated,
+                price=pkg.price,
+                orientation=fit.orientation,
+                clearance=fit.orientation.clearance,
+                occupancy_ratio=fit.occupancy_ratio,
+                occupancy_ratio_with_margin=fit.occupancy_ratio_with_margin,
+                deficit_details=None,
+            )
+            package_evaluations.append(ev)
+
+        # Ordena a lista geral de avaliações:
+        # Primeiro compatíveis (por volume interno útil/preço), depois incompatíveis
+        status_priority = {
+            PackageStatus.RECOMMENDED: 1,
+            PackageStatus.ALTERNATIVE: 2,
+            PackageStatus.NOT_RECOMMENDED: 3,
+            PackageStatus.INCOMPATIBLE: 4,
+        }
+        package_evaluations.sort(
+            key=lambda ev: (
+                status_priority[ev.status],
+                ev.internal_volume,
+                ev.price,
+            )
+        )
 
         return RecommendationResult(
             original_dimensions=(length, width, height),
@@ -657,10 +950,13 @@ class PackageRecommender:
             total_margin_per_axis=total_margin,
             wall_thickness=wall_thickness,
             total_wall_reduction_per_axis=total_wall_reduction,
+            min_occupancy_threshold=min_occupancy_threshold,
             required_dimensions=(req_l, req_w, req_h),
             bounding_box_volume=obj_vol,
             required_volume=req_vol,
             recommended=recommended,
             alternatives=alternatives,
+            not_recommended=not_recommended,
             all_compatible=compatible_fits,
+            evaluations=package_evaluations,
         )

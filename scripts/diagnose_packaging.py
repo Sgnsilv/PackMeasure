@@ -3,23 +3,22 @@
 
 Permite informar dimensões manualmente pelo terminal ou executar uma bateria
 completa de cenários de teste automatizados para validar a lógica de recomendação,
-dimensões internas estimadas, orientação ortogonal, margens de segurança,
-espessura de parede e tratamento de entradas inválidas.
+classificação funcional (RECOMMENDED, ALTERNATIVE, NOT_RECOMMENDED, INCOMPATIBLE),
+tabela comparativa completa, heurísticas de ocupação e limites operacionais.
 
 Uso:
     python scripts/diagnose_packaging.py --scenarios
     python scripts/diagnose_packaging.py -l 15 -w 10 -H 5
-    python scripts/diagnose_packaging.py --length 22 --width 14 --height 6 --margin 0.5 --thickness 0.4
+    python scripts/diagnose_packaging.py --length 22 --width 14 --height 6 --threshold 25.0
     python scripts/diagnose_packaging.py --interactive
 """
 
 from __future__ import annotations
 
 import argparse
-import math
 import sys
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import List, Optional
 
 # Garante acesso ao pacote src
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -28,18 +27,83 @@ if str(ROOT_DIR) not in sys.path:
 
 from src.packaging import (
     DEFAULT_MARGIN_PER_FACE,
+    DEFAULT_MIN_OCCUPANCY_THRESHOLD,
     DEFAULT_WALL_THICKNESS,
-    DISCLAIMER_TEXT,
     InvalidDimensionsError,
+    PackageEvaluation,
     PackageFit,
     PackageRecommender,
+    PackageStatus,
     PackagingError,
     RecommendationResult,
 )
 
 
+def format_evaluations_table(evaluations: List[PackageEvaluation]) -> str:
+    """Gera uma tabela formatada contendo todas as embalagens avaliadas."""
+    headers = ["Embalagem (Modelo)", "Status", "Ocup. Útil", "Preço Ref.", "Justificativa Dinâmica"]
+    
+    rows = []
+    for ev in evaluations:
+        pkg_name = f"{ev.package.name} ({ev.package.id})"
+        status_str = ev.status.value
+        occ_str = f"{ev.occupancy_ratio:.1f}%" if ev.occupancy_ratio is not None else "—"
+        price_str = f"R$ {ev.price:.2f}"
+        just_str = ev.justification
+        rows.append((pkg_name, status_str, occ_str, price_str, just_str))
+
+    # Larguras das colunas
+    col_w = [
+        max(len(r[0]) for r in rows + [tuple(headers)]),
+        max(len(r[1]) for r in rows + [tuple(headers)]),
+        max(len(r[2]) for r in rows + [tuple(headers)]),
+        max(len(r[3]) for r in rows + [tuple(headers)]),
+        min(65, max(len(r[4]) for r in rows + [tuple(headers)])),
+    ]
+
+    sep_line = "+" + "+".join("-" * (w + 2) for w in col_w) + "+"
+    header_line = "| " + " | ".join(f"{h:<{w}}" for h, w in zip(headers, col_w)) + " |"
+
+    output_lines = [sep_line, header_line, sep_line]
+    for r in rows:
+        # Quebra justificativa longa em linhas de até col_w[4] caracteres se necessário
+        just_text = r[4]
+        chunks = []
+        while len(just_text) > col_w[4]:
+            split_idx = just_text.rfind(" ", 0, col_w[4])
+            if split_idx == -1:
+                split_idx = col_w[4]
+            chunks.append(just_text[:split_idx])
+            just_text = just_text[split_idx:].strip()
+        chunks.append(just_text)
+
+        first_chunk = chunks[0] if chunks else ""
+        line = (
+            f"| {r[0]:<{col_w[0]}} "
+            f"| {r[1]:<{col_w[1]}} "
+            f"| {r[2]:<{col_w[2]}} "
+            f"| {r[3]:<{col_w[3]}} "
+            f"| {first_chunk:<{col_w[4]}} |"
+        )
+        output_lines.append(line)
+
+        for follow_chunk in chunks[1:]:
+            cont_line = (
+                f"| {'':<{col_w[0]}} "
+                f"| {'':<{col_w[1]}} "
+                f"| {'':<{col_w[2]}} "
+                f"| {'':<{col_w[3]}} "
+                f"| {follow_chunk:<{col_w[4]}} |"
+            )
+            output_lines.append(cont_line)
+
+        output_lines.append(sep_line)
+
+    return "\n".join(output_lines)
+
+
 def format_fit(fit: PackageFit, rank: Optional[int] = None) -> str:
-    """Formata os dados de uma embalagem compatível para exibição textual."""
+    """Formata os dados detalhados de uma embalagem compatível."""
     prefix = f"Opção #{rank} - " if rank is not None else ""
     pkg = fit.package
     ori = fit.orientation
@@ -62,34 +126,41 @@ def format_fit(fit: PackageFit, rank: Optional[int] = None) -> str:
 
 
 def print_result(result: RecommendationResult) -> None:
-    """Imprime o resultado detalhado da recomendação."""
+    """Imprime o resultado detalhado da recomendação e a tabela comparativa geral."""
     orig = result.original_dimensions
     req = result.required_dimensions
-    print("-" * 76)
+    print("-" * 80)
     print("DADOS DO OBJETO E PARÂMETROS:")
     print(
-        f" • Dimensões originais do objeto:     {orig[0]:.1f} × {orig[1]:.1f} × {orig[2]:.1f} cm"
+        f" • Dimensões originais do objeto:          {orig[0]:.1f} × {orig[1]:.1f} × {orig[2]:.1f} cm"
     )
     print(
         f" • Margem de segurança (acondicionamento): {result.margin_per_face:.2f} cm por face "
         f"(+{result.total_margin_per_axis:.2f} cm por eixo)"
     )
     print(
-        f" • Dimensões necessárias do objeto:   {req[0]:.1f} × {req[1]:.1f} × {req[2]:.1f} cm"
+        f" • Dimensões necessárias do objeto:        {req[0]:.1f} × {req[1]:.1f} × {req[2]:.1f} cm"
     )
     print(
-        f" • Espessura de parede da embalagem:  {result.wall_thickness:.2f} cm por parede "
+        f" • Espessura de parede da embalagem:       {result.wall_thickness:.2f} cm por parede "
         f"(-{result.total_wall_reduction_per_axis:.2f} cm por eixo externo)"
     )
     print(
-        f" • Volume delimitador original (obj): {result.bounding_box_volume:,.1f} cm³ "
+        f" • Limiar mín. de ocupação útil (heurística): {result.min_occupancy_threshold:.1f}%"
+    )
+    print(
+        f" • Volume delimitador original (obj):      {result.bounding_box_volume:,.1f} cm³ "
         f"({result.bounding_box_volume / 1000.0:.3f} L)"
     )
     print(
-        f" • Volume necessário com margem (obj): {result.required_volume:,.1f} cm³ "
+        f" • Volume necessário com margem (obj):     {result.required_volume:,.1f} cm³ "
         f"({result.required_volume / 1000.0:.3f} L)"
     )
-    print("-" * 76)
+    print("-" * 80)
+
+    print("\nTABELA GERAL DE AVALIAÇÃO DE TODAS AS EMBALAGENS DO CATÁLOGO:")
+    print(format_evaluations_table(result.evaluations))
+    print()
 
     if not result.has_compatible:
         print("[!] NENHUMA EMBALAGEM COMPATÍVEL ENCONTRADA NO CATÁLOGO.")
@@ -98,33 +169,39 @@ def print_result(result: RecommendationResult) -> None:
             "de todos os modelos cadastrados."
         )
         print(f"\n[Aviso] {result.disclaimer}")
-        print("-" * 76)
+        print("-" * 80)
         return
 
     print("RECOMENDAÇÃO PRINCIPAL (Menor volume útil interno / Menor preço):")
     print(format_fit(result.recommended))
-    print("-" * 76)
+    print("-" * 80)
 
     if result.alternatives:
-        print(f"ALTERNATIVAS COMPATÍVEIS ({len(result.alternatives)}):")
+        print(f"ALTERNATIVAS COMPATÍVEIS (Ocupação >= {result.min_occupancy_threshold:.0f}%) ({len(result.alternatives)}):")
         for idx, alt in enumerate(result.alternatives, start=2):
             print(format_fit(alt, rank=idx))
             print()
-        print("-" * 76)
-    else:
-        print("OUTRAS OPÇÕES: Nenhuma outra embalagem do catálogo acomoda este objeto.")
-        print("-" * 76)
+        print("-" * 80)
+
+    if result.not_recommended:
+        print(f"NÃO INDICADAS (Compatíveis, porém com ocupação < {result.min_occupancy_threshold:.0f}%) ({len(result.not_recommended)}):")
+        for nr in result.not_recommended:
+            print(f"  • {nr.package.name}: ocupação útil de {nr.occupancy_ratio:.1f}%")
+        print("-" * 80)
 
     print(f"[Aviso] {result.disclaimer}")
-    print("-" * 76)
+    print("-" * 80)
 
 
 def run_scenarios(recommender: PackageRecommender) -> None:
-    """Executa a bateria de 7 cenários previstos na especificação da issue."""
+    """Executa a bateria completa de cenários e validações."""
     print("=" * 80)
-    print(" BATERIA DE VALIDAÇÃO DE CENÁRIOS — MÓDULO DE EMBALAGENS (REVISÃO)")
+    print(" BATERIA DE VALIDAÇÃO — MÓDULO DE EMBALAGENS (STATUS E TABELA GERAL)")
     print("=" * 80)
-    print(f"Hipóteses padrão: Espessura de parede = {DEFAULT_WALL_THICKNESS} cm | Margem = {DEFAULT_MARGIN_PER_FACE} cm")
+    print(
+        f"Hipóteses padrão: Espessura = {DEFAULT_WALL_THICKNESS} cm | "
+        f"Margem = {DEFAULT_MARGIN_PER_FACE} cm | Limiar Ocupação = {DEFAULT_MIN_OCCUPANCY_THRESHOLD}%"
+    )
     print("=" * 80)
 
     # 1. Objeto pequeno
@@ -143,20 +220,21 @@ def run_scenarios(recommender: PackageRecommender) -> None:
     res2 = recommender.recommend(6.0, 21.0, 13.0)
     print_result(res2)
 
-    # 3. Múltiplas embalagens
-    print("\n>>> [Cenário 3: Objeto Compatível com Múltiplas Embalagens]")
+    # 3. Múltiplas embalagens e diferenciação de ALTERNATIVE vs NOT_RECOMMENDED
+    print("\n>>> [Cenário 3: Objeto com Múltiplas Embalagens e Avaliação de Status]")
     print(
-        "    Descrição: Objeto (16.0 × 10.0 × 5.0 cm) que cabe no espaço interno da Caixa P, M, G e GG. "
-        "Verifica a ordenação ótima por menor volume útil interno."
+        "    Descrição: Objeto (24.0 × 18.0 × 10.0 cm). Não cabe na Caixa P (incompatível). "
+        "Cabe na Caixa M (Recomendada, ocupação 57.2%), Caixa G (Alternativa, ocupação 16.6% sob threshold 15%) "
+        "e Caixa GG (Não recomendada, ocupação 6.9%)."
     )
-    res3 = recommender.recommend(16.0, 10.0, 5.0)
+    res3 = recommender.recommend(24.0, 18.0, 10.0, min_occupancy_threshold=15.0)
     print_result(res3)
 
     # 4. Próximo ao limite dimensional
     print("\n>>> [Cenário 4: Objeto Próximo ao Limite Dimensional Interno]")
     print(
         "    Descrição: Objeto com 22.2 × 14.2 × 6.2 cm. Com margem de 1.0 cm no total, atinge exatamente "
-        "23.2 × 15.2 × 7.2 cm, o limite exato do espaço interno útil estimado da Caixa P (24 - 0.8 = 23.2, etc.)."
+        "23.2 × 15.2 × 7.2 cm, o limite exato do espaço interno útil estimado da Caixa P."
     )
     res4 = recommender.recommend(22.2, 14.2, 6.2)
     print_result(res4)
@@ -165,14 +243,14 @@ def run_scenarios(recommender: PackageRecommender) -> None:
     print("\n>>> [Cenário 5: Objeto Incompatível com Todas as Embalagens]")
     print(
         "    Descrição: Objeto grande (55.0 × 40.0 × 32.0 cm) que excede o espaço interno útil da Caixa GG "
-        "(51.2 × 39.2 × 31.2 cm)."
+        "(51.2 × 39.2 × 31.2 cm). Avalia o detalhamento do menor déficit dimensional."
     )
     res5 = recommender.recommend(55.0, 40.0, 32.0)
     print_result(res5)
 
-    # 6. Dimensões inválidas (Bateria abrangente de entradas anômalas)
-    print("\n>>> [Cenário 6: Dimensões Inválidas (Tratamento de Exceções)]")
-    print("    Descrição: Validação estrita de entradas anômalas: negativa, zero, NaN, Inf, margem/espessura negativas.")
+    # 6. Validação estrita de entradas anômalas e limites operacionais
+    print("\n>>> [Cenário 6: Entradas Inválidas e Limites do Percentual de Ocupação]")
+    print("    Descrição: Validação estrita de NaN, Inf, negativos, zero e limites de threshold (0% a 100%).")
 
     invalid_cases = [
         {"desc": "Comprimento negativo (-5.0, 10.0, 5.0)", "call": lambda: recommender.recommend(-5.0, 10.0, 5.0)},
@@ -181,6 +259,8 @@ def run_scenarios(recommender: PackageRecommender) -> None:
         {"desc": "Comprimento Inf (float('inf'), 10.0, 5.0)", "call": lambda: recommender.recommend(float("inf"), 10.0, 5.0)},
         {"desc": "Margem por face negativa (margin_per_face=-0.5)", "call": lambda: recommender.recommend(10.0, 10.0, 5.0, margin_per_face=-0.5)},
         {"desc": "Espessura de parede negativa (wall_thickness=-0.2)", "call": lambda: recommender.recommend(10.0, 10.0, 5.0, wall_thickness=-0.2)},
+        {"desc": "Limiar de ocupação negativo (min_occupancy_threshold=-5.0)", "call": lambda: recommender.recommend(10.0, 10.0, 5.0, min_occupancy_threshold=-5.0)},
+        {"desc": "Limiar de ocupação superior a 100% (min_occupancy_threshold=105.0)", "call": lambda: recommender.recommend(10.0, 10.0, 5.0, min_occupancy_threshold=105.0)},
     ]
 
     for case in invalid_cases:
@@ -190,46 +270,34 @@ def run_scenarios(recommender: PackageRecommender) -> None:
         except InvalidDimensionsError as exc:
             print(f"    [✓] {case['desc']} -> Exceção capturada: {exc}")
 
-    # 7. Alteração da margem de segurança
-    print("\n>>> [Cenário 7: Alteração da Margem de Segurança]")
+    # 7. Validação da prioridade da embalagem recomendada independentemente da ocupação
+    print("\n>>> [Cenário 7: Prioridade de RECOMMENDED mesmo com Baixa Ocupação]")
     print(
-        "    Descrição: Compara o mesmo objeto (22.0 × 14.0 × 6.0 cm) sob margem padrão (0.5 cm/face) "
-        "vs margem ampliada (1.0 cm/face)."
+        "    Descrição: Objeto muito pequeno (5.0 × 5.0 × 2.0 cm). Ocupação útil na menor caixa (Caixa P) "
+        "é de apenas ~1.97% (muito abaixo do limiar padrão de 20%). "
+        "A menor embalagem compatível DEVE ser classificada como RECOMMENDED, e as demais como NOT_RECOMMENDED."
     )
-    obj_dims = (22.0, 14.0, 6.0)
-    print(f"    Dimensões do objeto: {obj_dims[0]} × {obj_dims[1]} × {obj_dims[2]} cm")
+    res7 = recommender.recommend(5.0, 5.0, 2.0, min_occupancy_threshold=20.0)
+    print_result(res7)
 
-    print("\n    --- Teste A: Margem padrão de 0.5 cm por face (+1.0 cm total) ---")
-    res_a = recommender.recommend(*obj_dims, margin_per_face=0.5)
-    rec_name_a = res_a.recommended.package.name if res_a.recommended else "Nenhuma"
-    print(f"    Recomendação: {rec_name_a}")
-    print(
-        f"    Dimensões necessárias: {res_a.required_dimensions[0]:.1f} × "
-        f"{res_a.required_dimensions[1]:.1f} × {res_a.required_dimensions[2]:.1f} cm "
-        f"(limite interno Caixa P: 23.2 × 15.2 × 7.2 cm)"
-    )
-
-    print("\n    --- Teste B: Margem ampliada de 1.0 cm por face (+2.0 cm total) ---")
-    res_b = recommender.recommend(*obj_dims, margin_per_face=1.0)
-    rec_name_b = res_b.recommended.package.name if res_b.recommended else "Nenhuma"
-    print(f"    Recomendação: {rec_name_b}")
-    print(
-        f"    Dimensões necessárias: {res_b.required_dimensions[0]:.1f} × "
-        f"{res_b.required_dimensions[1]:.1f} × {res_b.required_dimensions[2]:.1f} cm "
-        f"(excede Caixa P, migra para Caixa M)"
-    )
-    print("    [✓] Resultado: Com a margem ampliada, o objeto foi corretamente realocado para a Caixa M.")
+    # Conferência programática da regra
+    rec_ev = next(ev for ev in res7.evaluations if ev.package.id == "caixa_p")
+    print("    [Checagem da regra de negócio]:")
+    print(f"    • Caixa P status: {rec_ev.status.value} (esperado: RECOMMENDED)")
+    print(f"    • Ocupação da Caixa P: {rec_ev.occupancy_ratio:.2f}% (abaixo do limiar de 20%)")
+    assert rec_ev.status == PackageStatus.RECOMMENDED, "Caixa P deveria ser RECOMMENDED!"
+    print("    [✓] Regra validada com sucesso: menor caixa compatível é sempre RECOMMENDED.")
 
     print("\n" + "=" * 80)
-    print(" TODOS OS CENÁRIOS FORAM VALIDADOS COM SUCESSO!")
+    print(" TODOS OS CENÁRIOS E VALIDAÇÕES FORAM EXECUTADOS COM SUCESSO!")
     print("=" * 80)
 
 
 def interactive_mode(recommender: PackageRecommender) -> None:
     """Permite ao usuário informar dimensões iterativamente pelo terminal."""
-    print("=" * 76)
+    print("=" * 80)
     print(" PackMeasure — Recomendação Interativa de Embalagens")
-    print("=" * 76)
+    print("=" * 80)
     print("Digite as dimensões do objeto em centímetros (ou 'q' para sair):")
 
     while True:
@@ -253,7 +321,15 @@ def interactive_mode(recommender: PackageRecommender) -> None:
             thick_input = input(f"  Espessura parede em cm [Enter para {DEFAULT_WALL_THICKNESS}]: ").strip()
             thick = float(thick_input.replace(",", ".")) if thick_input else DEFAULT_WALL_THICKNESS
 
-            res = recommender.recommend(c, l, a, margin_per_face=margin, wall_thickness=thick)
+            thresh_input = input(f"  Limiar de ocupação mín. %% [Enter para {DEFAULT_MIN_OCCUPANCY_THRESHOLD}]: ").strip()
+            thresh = float(thresh_input.replace(",", ".")) if thresh_input else DEFAULT_MIN_OCCUPANCY_THRESHOLD
+
+            res = recommender.recommend(
+                c, l, a,
+                margin_per_face=margin,
+                wall_thickness=thick,
+                min_occupancy_threshold=thresh,
+            )
             print_result(res)
 
         except (ValueError, PackagingError) as exc:
@@ -302,6 +378,13 @@ def main() -> int:
         help="Espessura estimada de cada parede da caixa em cm.",
     )
     parser.add_argument(
+        "--threshold",
+        "-T",
+        type=float,
+        default=DEFAULT_MIN_OCCUPANCY_THRESHOLD,
+        help="Limiar percentual de ocupação mínima para status ALTERNATIVE (0 a 100%%).",
+    )
+    parser.add_argument(
         "--catalog",
         "-c",
         default="data/catalog/embalagens_correios.json",
@@ -311,7 +394,7 @@ def main() -> int:
         "--scenarios",
         "-s",
         action="store_true",
-        help="Executa a bateria de 7 cenários pré-configurados.",
+        help="Executa a bateria de cenários pré-configurados.",
     )
     parser.add_argument(
         "--interactive",
@@ -351,6 +434,7 @@ def main() -> int:
             args.height,
             margin_per_face=args.margin,
             wall_thickness=args.thickness,
+            min_occupancy_threshold=args.threshold,
         )
         print_result(res)
         return 0
