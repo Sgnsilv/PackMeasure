@@ -1,0 +1,70 @@
+{
+  "metadados": {
+    "versao": "1.1",
+    "data_consulta": "2026-11-27",
+    "fontes_referencia": [
+      "https://www2.correios.com.br/sistemas/precosPrazos/",
+      "https://www.correios.com.br"
+    ],
+    "descricao": "Catálogo de caixas de encomenda padrão comercializadas pelos Correios para envio de encomendas nacionais (SEDEX / PAC).",
+    "nota_dimensoes": "As dimensões divulgadas oficialmente pelos Correios referem-se às medidas nominais externas da caixa montada, confirmadas no simulador de preços e prazos dos Correios. O espaço interno disponível e a compatibilidade são estimados com base na espessura de parede configurável e margem de acondicionamento do projeto."
+  },
+  "embalagens": [
+    {
+      "id": "caixa_p",
+      "nome": "Caixa de Encomenda Pequena (P)",
+      "comprimento": 24.0,
+      "largura": 16.0,
+      "altura": 8.0,
+      "unidade": "cm",
+      "tipo_dimensoes": "externas",
+      "preco": 7.40,
+      "moeda": "BRL",
+      "fonte": "Simulador oficial de Preços e Prazos dos Correios (https://www2.correios.com.br/sistemas/precosPrazos/)",
+      "data_consulta": "2026-11-27",
+      "descricao": "Indicada para pequenos eletrônicos, smartphones, livros, cosméticos, acessórios e pequenos objetos."
+    },
+    {
+      "id": "caixa_m",
+      "nome": "Caixa de Encomenda Média (M)",
+      "comprimento": 30.0,
+      "largura": 22.0,
+      "altura": 13.0,
+      "unidade": "cm",
+      "tipo_dimensoes": "externas",
+      "preco": 8.30,
+      "moeda": "BRL",
+      "fonte": "Simulador oficial de Preços e Prazos dos Correios (https://www2.correios.com.br/sistemas/precosPrazos/)",
+      "data_consulta": "2026-11-27",
+      "descricao": "Indicada para calçados, roupas dobradas, peças de informática, livros em lote e kits de presentes."
+    },
+    {
+      "id": "caixa_g",
+      "nome": "Caixa de Encomenda Grande (G)",
+      "comprimento": 36.0,
+      "largura": 28.0,
+      "altura": 28.0,
+      "unidade": "cm",
+      "tipo_dimensoes": "externas",
+      "preco": 15.35,
+      "moeda": "BRL",
+      "fonte": "Simulador oficial de Preços e Prazos dos Correios (https://www2.correios.com.br/sistemas/precosPrazos/)",
+      "data_consulta": "2026-11-27",
+      "descricao": "Indicada para eletroportáteis, conjuntos de vestuário, brinquedos de médio porte e encomendas de maior volume."
+    },
+    {
+      "id": "caixa_gg",
+      "nome": "Caixa de Encomenda Extra Grande (GG)",
+      "comprimento": 52.0,
+      "largura": 40.0,
+      "altura": 32.0,
+      "unidade": "cm",
+      "tipo_dimensoes": "externas",
+      "preco": 21.60,
+      "moeda": "BRL",
+      "fonte": "Simulador oficial de Preços e Prazos dos Correios (https://www2.correios.com.br/sistemas/precosPrazos/)",
+      "data_consulta": "2026-11-27",
+      "descricao": "Indicada para volumes grandes, múltiplos itens ou encomendas que demandam grande capacidade cúbica."
+    }
+  ]
+}

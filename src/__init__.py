@@ -12,8 +12,21 @@ from src.capture import (
     StereoCaptureError,
     StereoPair,
 )
+from src.packaging import (
+    CatalogError,
+    CatalogNotFoundError,
+    CatalogValidationError,
+    InvalidDimensionsError,
+    OrientationFit,
+    Package,
+    PackageFit,
+    PackageRecommender,
+    PackagingError,
+    RecommendationResult,
+)
 
 __all__ = [
+    # Módulo de captura
     "CameraConfig",
     "CameraDevice",
     "CameraError",
@@ -24,4 +37,15 @@ __all__ = [
     "StereoCameraCapture",
     "StereoCaptureError",
     "StereoPair",
+    # Módulo de embalagens
+    "CatalogError",
+    "CatalogNotFoundError",
+    "CatalogValidationError",
+    "InvalidDimensionsError",
+    "OrientationFit",
+    "Package",
+    "PackageFit",
+    "PackageRecommender",
+    "PackagingError",
+    "RecommendationResult",
 ]
